@@ -1,0 +1,416 @@
+---
+title: "1008 Soil Visualizations"
+output: html_document
+date: "2024-03-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Initializing
+```{r}
+# Load libraries.
+library(lubridate)
+library(readr)
+library(anytime)
+library(DT)
+library(RColorBrewer)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(scales)
+library(reshape2)
+library(ggrepel)
+library(PEIP)
+library(openxlsx)
+```
+
+```{r}
+## Import the data:
+raw_data <- read_excel("./CECHS_DU_DATA-Official1.xlsx", sheet = "NoStandards")
+
+# Filter out the data so we only have the observations we need, in this case home 1008
+# This will allow you to make manual additions to the dataset easier if needed
+raw_data <- raw_data %>%
+  filter(substr(HouseholdID, 1, 4) == "1008")
+write.xlsx(raw_data, "home1008.xlsx", rowNames = FALSE)
+
+# If you made additions to the data run this
+raw_data <- read_excel("home1008.xlsx", sheet = "Sheet 1", guess_max = 10000)
+
+# Explore the head of the data-set.
+head(raw_data)
+
+## Variables: 
+  # Time is stored as year/month/day/hour/minute/second.
+  # Type describes the category of sample (e.g., soil). 
+  # Units are in ppm. 
+  # Flags refer to any additional info that should be taken into consideration. 
+  # Sample contains sample name organized by household ID, room type, etc. 
+  # Household ID = unique character assigned to each house in the study.
+
+## Elements (also stored as variables):
+  # Zr (Zirconium), 
+  # Sr (Strontium), 
+  # U (Uranium), 
+  # Rb (Rubidium),
+  # Th (Thorium),
+  # Pb (Lead), 
+  # Au (Gold),
+  # Se (Selenium), 
+  # As (Arsenic),
+  # Hg (Mercury),
+  # Zn (Zinc),
+  # W (Tungsten),
+  # Cu (Copper),
+  # Ni (Nickel),
+  # Co (Cobalt),
+  # Fe (Iron),
+  # Mn (Manganese),
+  # Cr (Chromium),
+  # V (Vanadium), 
+  # Ti (Titanium), 
+  # Sc (Scandium),
+  # Ca (Calcium),
+  # K (Potassium),
+  # S (Sulfur),
+  # Ba (Barium),
+  # Cs (Cesium),
+  # Te (Tellurium),
+  # Sb (Antimony),
+  # Sn (Tin),
+  # Cd (Cadmium),
+  # Ag (Silver), &
+  # Pd (Palladium). 
+
+```
+
+## Tidying
+```{r}
+## Mutate the time variable.
+
+# Make Date considered as date by R.
+raw_data <- raw_data %>% mutate(DateTime = ymd_hms(Time, tz="America/New_York"))
+raw_data$DateTime <- as.POSIXlt(raw_data$DateTime)
+raw_data <- raw_data %>% mutate(Year = year(DateTime),
+                          Month = month(DateTime),
+                          Day = day(DateTime))
+raw_data <- raw_data %>% mutate(meas_time = make_datetime(Year,Month,Day, tz="America/New_York"))
+```
+
+```{r}
+# Average the results of the different "shots" for each sample.
+# Necessary to calculate the standard deviation and counts (n) of values. 
+raw_data %>% mutate(Time = ymd_hms(Time))
+raw_data$Time
+sapply(raw_data, class)
+is.numeric(raw_data$Pb)
+raw_data$Pb
+raw_data <- raw_data %>% mutate_at(c('Mo', 'Zr', 'Sr', 'U', 'Rb', 'Th', 'Pb', 'Au', 'Se', 'As', 'Hg', 'Zn', 'W', 'Cu', 'Ni', 'Co', 'Mn', 'Cr', 'V', 'Ti', 'Sc', 'S', 'Ba', 'Cs', 'Te', 'Sb', 'Sn', 'Cd', 'Ag', 'Pd'), as.numeric)
+str(raw_data)
+
+# Check to ensure the elements are stored as numeric variables.
+is.numeric(raw_data$Pb)
+raw_data$Pb
+class(raw_data$As)
+```
+
+## Standard Deviations
+```{r}
+## Standard Deviation
+
+dataset <- raw_data %>%
+  group_by(HouseholdID, SamplePlace, SAMPLE) %>%
+  summarise(across(c("Mo", "Zr", "Sr", "U", "Rb", "Th", "Pb", "Au", "Se",
+                                 "As", "Hg", "Zn", "W", "Cu", "Ni", "Co", "Fe", "Mn"),
+                   list(mean = ~ mean(., na.rm = TRUE), sd = ~ sd(., na.rm = TRUE)),
+                   .names = "{.fn}_{.col}"),
+            n = n())
+dataset
+```
+
+## RSDs
+```{r}
+# Calculate the Relative Standard Deviation (RSD) for each relevant element. 
+
+dataset <- dataset %>%
+  mutate(across(starts_with("sd_"), ~ . / get(sub("sd_", "mean_", cur_column())) * 100,
+                .names = "{sub('sd_', '', .col)}_RSD"))
+dataset
+```
+
+## UCLs
+```{r}
+## Calculate the Upper Confidence Levels (UCLs). 
+
+# Instead of mean, "UCL was used because this is the statistical metric the EPA uses for site assessment, and we wanted to match that process as closely as possible" (Peters, et. al). 
+
+# Unlike means, UCLs can be compared with EPA RSLs:
+  # μ = mean of all readings
+  # Tinv = inverse of the Student's t-distribution
+  # 0.1 = 1-sided p-value for a 95% confidence interval
+  # n = number of XRF readings
+  # sd = standard deviation of XRF readings
+dataset <- dataset %>%
+  mutate(Pb_UCL = mean_Pb - tinv(0.05,n-1)*sd_Pb/sqrt(n))%>%
+  mutate(As_UCL = mean_As - tinv(0.05,n-1)*sd_As/sqrt(n))%>%
+  mutate(Hg_UCL = mean_Hg - tinv(0.05,n-1)*sd_Hg/sqrt(n))%>%
+  mutate(U_UCL = mean_U - tinv(0.05,n-1)*sd_U/sqrt(n))
+
+# Note that there is no mean for Cadmium (Cd), so we can't calculate its UCL. 
+
+# View the UCLs by element:
+dataset$Pb_UCL
+dataset$As_UCL
+dataset$Hg_UCL
+dataset$U_UCL
+```
+
+## RSLs
+```{r}
+## We want to compare our UCLs against EPA RSLs & the state of GA's RSLs.
+# Mutate the dataset to include these new variables:
+dataset <- dataset%>%
+  mutate(Pb_RSL = 400)%>% # Lead RSL for EPA
+  mutate(Pb_UGA = 75)%>%  # Lead RSL for UGA
+  mutate(Pb_EPD = 270)%>% # Lead RSL for GA EPD
+  
+  mutate(As_RSL = 35)%>%  # Arsenic RSL for EPA
+  mutate(As_UGA = 20)%>%  # Arsenic RSL for UGA
+  mutate(As_EPD = 20)%>%  # Arsenic RSL for GA EPD
+  
+  mutate(Hg_RSL = 11)%>%  # Mercury RSL for EPA
+  mutate(Hg_UGA = 0.5)%>% # Mercury RSL for UGA
+  mutate(Hg_EPD = 2.1)%>% # Mercury RSL for GA EPD
+  
+  mutate(U_RSL = 16)%>%   # Uranium RSL for EPA
+  
+  mutate(Cd_RSL = 7.1)%>% # Cadmium RSL for EPA
+  mutate(Cd_EPD = 7.5)    # Cadmium RSL for GA EPD
+```
+
+## Visualizations
+### Lead (Pb)
+```{r, echo = F, warning = F}
+# Create a table that shows the RSD calculations in case we need to re-run any samples.
+dataset %>%
+  filter(Pb_RSD >= 35) %>%
+  select(SAMPLE, Pb_RSD)
+```
+
+####Home 6
+```{r}
+## HOME SIX
+# Create a new data frame for just Home Six:
+HomeEight <- dataset %>%
+  group_by(SamplePlace)%>%
+  # Calculate the mean (3 significant figures) across all samples shots.
+  mutate(mean_Pb_UCL = signif(mean(Pb_UCL, na.rm = TRUE), 3))%>%
+  mutate(mean_As_UCL = signif(mean(As_UCL, na.rm = TRUE), 3))%>%
+  mutate(mean_Hg_UCL = signif(mean(Hg_UCL, na.rm = TRUE), 3))%>%
+  mutate(mean_U_UCL = signif(mean(U_UCL, na.rm = TRUE), 3)) %>%
+  mutate(mean_sd_Pb = sd(Pb_UCL, na.rm=TRUE))%>%
+  mutate(mean_sd_As = sd(As_UCL, na.rm=TRUE))%>%
+  mutate(mean_sd_Hg = sd(Hg_UCL, na.rm=TRUE))%>%
+  mutate(mean_sd_U = sd(U_UCL, na.rm=TRUE))
+
+HomeEight
+
+
+```
+
+```{r}
+HomeEight_Pb <- ggplot(HomeEight, aes(x = SamplePlace, y = mean_Pb_UCL)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), 
+           fill = "palegreen", color = "palegreen4") +  # Green bars
+  
+  geom_errorbar(
+    aes(ymin = mean_Pb_UCL - mean_sd_Pb, ymax = mean_Pb_UCL + mean_sd_Pb),
+    position = position_dodge(width = 0.8),
+    width = 0.3,  # Adjust the width of the error bars
+    color = "black"  # Match color to bars
+  ) +
+  
+  geom_text(aes(y = ifelse(!is.na(mean_sd_Pb), 
+                           mean_Pb_UCL + mean_sd_Pb + 8, mean_Pb_UCL + 8), label = mean_Pb_UCL), 
+            color = "black", size = 4, fontface = "bold") +  # Label inside bars
+  
+  scale_y_continuous(breaks = seq(0, 220, 20), limits = c(0, 220)) +
+  
+  geom_hline(aes(yintercept = 200), color = "#FF0000", linetype = "solid") +
+  annotate("text", x = 1.2, y = 215, label = "Federal Screening Level (200 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  # geom_hline(aes(yintercept = 270), color = "gold", linetype = "solid") +
+  # annotate("text", x = 1.8, y = 280, label = "State Screening Level (270 ppm)",
+  #          color = "black", size = 4, fontface = "bold") +
+  
+  labs(title = "", x = "Sample Location", y = "Soil Lead Level (ppm)") +
+  
+  theme_minimal() +
+  
+  theme(
+    axis.text.x = element_text(angle = 0, face = "bold", size = 12),  # Larger x-axis labels
+    axis.text.y = element_text(face = "bold", size = 12),  # Larger y-axis labels
+    axis.title = element_text(face = "bold", size = 14),  # Larger axis titles
+    panel.grid.major = element_line(color = "lightgray"),  # Add light gray gridlines
+    panel.background = element_rect(fill = "aliceblue"),  # Add light blue background
+    plot.title = element_text(size = 16, face = "bold")  # Larger title
+  )
+
+print(HomeEight_Pb)
+pdf('Home08_Pb.pdf')
+HomeEight_Pb
+dev.off()
+```
+
+
+### Arsenic (As)
+```{r, echo = F, warning = F}
+# Create a table that shows the RSD calculations in case we need to re-run any samples.
+dataset %>%
+  filter(As_RSD >= 35) %>%
+  select(SAMPLE, As_RSD)
+```
+
+```{r}
+HomeEight_As <- ggplot(HomeEight, aes(x = SamplePlace, y = mean_As_UCL)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), 
+           fill = "palegreen", color = "palegreen4") +  # Green bars
+  
+  geom_errorbar(
+    aes(ymin = mean_As_UCL - mean_sd_As, ymax = mean_As_UCL + mean_sd_As),
+    position = position_dodge(width = 0.8),
+    width = 0.3,  # Adjust the width of the error bars
+    color = "black"  # Match color to bars
+  ) +
+  
+  geom_text(aes(y = ifelse(!is.na(mean_sd_As), 
+                           mean_As_UCL + mean_sd_As + 1.5, mean_As_UCL + 1.5), label = mean_As_UCL), 
+            color = "black", size = 4, fontface = "bold") +  # Label inside bars
+  
+  scale_y_continuous(breaks = seq(0, 40, 5), limits = c(0, 40)) +
+  
+  geom_hline(aes(yintercept = 35), color = "#FF0000", linetype = "solid") +
+  annotate("text", x = 1.7, y = 37, label = "Federal Screening Level (35 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  geom_hline(aes(yintercept = 20), color = "gold", linetype = "solid") +
+  annotate("text", x = 1.8, y = 22, label = "State Screening Level (20 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  labs(title = "", x = "Sample Location", y = "Soil Arsenic Level (ppm)") +
+  
+  theme_minimal() +
+  
+  theme(
+    axis.text.x = element_text(angle = 0, face = "bold", size = 12),  # Larger x-axis labels
+    axis.text.y = element_text(face = "bold", size = 12),  # Larger y-axis labels
+    axis.title = element_text(face = "bold", size = 14),  # Larger axis titles
+    panel.grid.major = element_line(color = "lightgray"),  # Add light gray gridlines
+    panel.background = element_rect(fill = "aliceblue"),  # Add light blue background
+    plot.title = element_text(size = 16, face = "bold")  # Larger title
+  )
+
+print(HomeEight_As)
+pdf('Home08_As.pdf')
+HomeEight_As
+dev.off()
+```
+
+```{r}
+HomeEight_Hg <- ggplot(HomeEight, aes(x = SamplePlace, y = mean_Hg_UCL)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), 
+           fill = "palegreen", color = "palegreen4") +  # Green bars
+  
+  geom_errorbar(
+    aes(ymin = mean_Hg_UCL - mean_sd_Hg, ymax = mean_Hg_UCL + mean_sd_Hg),
+    position = position_dodge(width = 0.8),
+    width = 0.3,  # Adjust the width of the error bars
+    color = "black"  # Match color to bars
+  ) +
+  
+  geom_text(aes(y = ifelse(!is.na(mean_sd_Hg), 
+                           mean_Hg_UCL + mean_sd_Hg + 0.5, mean_Hg_UCL + 0.5), label = mean_Hg_UCL), 
+            color = "black", size = 4, fontface = "bold") +  # Label inside bars
+  
+  scale_y_continuous(breaks = seq(0, 12, 2), limits = c(0, 12)) +
+  
+  geom_hline(aes(yintercept = 11), color = "#FF0000", linetype = "solid") +
+  annotate("text", x = 1.7, y = 11.5, label = "Federal Screening Level (11 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  geom_hline(aes(yintercept = 2.1), color = "gold", linetype = "solid") +
+  annotate("text", x = 1.8, y = 2.5, label = "State Screening Level (2.1 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  labs(title = "", x = "Sample Location", y = "Soil Mercury Level (ppm)") +
+  
+  theme_minimal() +
+  
+  theme(
+    axis.text.x = element_text(angle = 0, face = "bold", size = 12),  # Larger x-axis labels
+    axis.text.y = element_text(face = "bold", size = 12),  # Larger y-axis labels
+    axis.title = element_text(face = "bold", size = 14),  # Larger axis titles
+    panel.grid.major = element_line(color = "lightgray"),  # Add light gray gridlines
+    panel.background = element_rect(fill = "aliceblue"),  # Add light blue background
+    plot.title = element_text(size = 16, face = "bold")  # Larger title
+  )
+
+print(HomeEight_Hg)
+pdf('Home08_Hg.pdf')
+HomeEight_Hg
+dev.off()
+```
+
+```{r}
+HomeEight_U <- ggplot(HomeEight, aes(x = SamplePlace, y = mean_U_UCL)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), 
+           fill = "palegreen", color = "palegreen4") +  # Green bars
+  
+  geom_errorbar(
+    aes(ymin = mean_U_UCL - mean_sd_U, ymax = mean_U_UCL + mean_sd_U),
+    position = position_dodge(width = 0.8),
+    width = 0.3,  # Adjust the width of the error bars
+    color = "black"  # Match color to bars
+  ) +
+  
+  geom_text(aes(y = ifelse(!is.na(mean_sd_U), 
+                           mean_U_UCL + mean_sd_U + 1, mean_U_UCL + 1), label = mean_U_UCL), 
+            color = "black", size = 4, fontface = "bold") +  # Label inside bars
+  
+  scale_y_continuous(breaks = seq(0, 22, 2), limits = c(0, 22)) +
+  
+  geom_hline(aes(yintercept = 16), color = "#FF0000", linetype = "solid") +
+  annotate("text", x = 1, y = 16.7, label = "Federal Screening Level (16 ppm)",
+           color = "black", size = 4, fontface = "bold") +
+  
+  labs(title = "", x = "Sample Location", y = "Soil Uranium Level (ppm)") +
+  
+  theme_minimal() +
+  
+  theme(
+    axis.text.x = element_text(angle = 0, face = "bold", size = 12),  # Larger x-axis labels
+    axis.text.y = element_text(face = "bold", size = 12),  # Larger y-axis labels
+    axis.title = element_text(face = "bold", size = 14),  # Larger axis titles
+    panel.grid.major = element_line(color = "lightgray"),  # Add light gray gridlines
+    panel.background = element_rect(fill = "aliceblue"),  # Add light blue background
+    plot.title = element_text(size = 16, face = "bold")  # Larger title
+  )
+
+print(HomeEight_U)
+pdf('Home08_U.pdf')
+HomeEight_U
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
