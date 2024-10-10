@@ -1,0 +1,154 @@
+---
+title: "CO2 2030 Gridmap"
+output: html_document
+date: "2024-10-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars}
+library(rnaturalearth)
+library(sf)
+library(ggplot2)
+library(openxlsx)
+library(dplyr)
+```
+
+
+## Load EDGAR data for 2022
+```{r}
+emissions_data <- read.table("v8.0_FT2022_GHG_GWP_100_AR5_GHG_2022_TOTALS.txt", header = TRUE, sep = ";")
+```
+
+## Create world map and match EDGAR data to the map
+```{r pressure, echo=FALSE}
+# Load the country boundaries data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Convert the emissions data frame to a spatial object
+r_sf <- st_as_sf(emissions_data, coords = c("lon", "lat"), crs = 4326)
+
+# Perform a spatial join to assign countries to each grid cell
+grid_with_countries <- st_join(r_sf, world[, c("iso_a3", "name")], join = st_intersects)
+
+grid_with_countries$x <- st_coordinates(grid_with_countries)[, 1]
+grid_with_countries$y <- st_coordinates(grid_with_countries)[, 2]
+```
+
+## Load our emissions by country data
+This is where our ratios for each country are
+```{r}
+world_totals <- read.xlsx("World Totals New.xlsx")
+```
+
+## Merge the spacial data with the emissions by country
+```{r}
+# Merge the country ratios with the grid data
+grid_with_ratios <- merge(grid_with_countries, world_totals, by.x = "name",  by.y = "PARTY", all.x = TRUE)
+```
+
+## Apply each countries ratio to the EDGAR data
+```{r}
+# Apply the ratio to the emissions data, adjust the values
+grid_with_ratios$Adjusted_Emissions <- grid_with_ratios$emission * grid_with_ratios$Ratio
+```
+
+```{r}
+# Summarize emissions for each grid cell
+grid_summary <- aggregate(Adjusted_Emissions ~ x + y, data = grid_with_ratios, FUN = sum, na.rm = TRUE)
+```
+
+## Rename
+```{r}
+colnames(grid_summary)[colnames(grid_summary) == "x"] <- "lon"
+colnames(grid_summary)[colnames(grid_summary) == "y"] <- "lat"
+```
+
+## Save the new data as a CSV
+```{r}
+write.csv(grid_summary, "Adjusted Emissions (1).csv", row.names = FALSE)
+```
+
+## Test for correct emission totals
+```{r}
+total_emissions_by_country <- grid_with_ratios %>%
+  filter(name == "Afghanistan") %>%
+  summarise(total_emissions = sum(`Adjusted_Emissions`, na.rm = TRUE))
+
+total_emissions_by_country
+```
+
+## Load Adjusted Emissions Data
+```{r}
+adjusted_data <- read.csv("Adjusted Emissions (1).csv")
+```
+
+## Create world map and match data to the map
+```{r pressure, echo=FALSE}
+# Load the country boundaries data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Convert the emissions data frame to a spatial object
+r_sf <- st_as_sf(adjusted_data, coords = c("lon", "lat"), crs = 4326)
+
+# Perform a spatial join to assign countries to each grid cell
+grid_with_countries <- st_join(r_sf, world[, c("iso_a3", "name")], join = st_intersects)
+
+grid_with_countries$x <- st_coordinates(grid_with_countries)[, 1]
+grid_with_countries$y <- st_coordinates(grid_with_countries)[, 2]
+```
+
+## Merge the spacial data with the emissions by country
+```{r}
+# Merge the country ratios with the grid data
+grid_with_ratios <- merge(grid_with_countries, world_data, by.x = "name",  by.y = "PARTY", all.x = TRUE)
+```
+
+## Apply each countries CO2 ratio to the data
+```{r}
+# Apply the ratio to the emissions data, adjust the values
+grid_with_ratios$Adjusted_Emissions <- grid_with_ratios$Adjusted_Emissions * grid_with_ratios$ratio.co2
+```
+
+```{r}
+# Summarize emissions for each grid cell
+grid_summary <- aggregate(Adjusted_Emissions ~ x + y, data = grid_with_ratios, FUN = sum, na.rm = TRUE)
+```
+
+## Rename
+```{r}
+colnames(grid_summary)[colnames(grid_summary) == "x"] <- "lon"
+colnames(grid_summary)[colnames(grid_summary) == "y"] <- "lat"
+```
+
+## Save the new data as a CSV
+```{r}
+write.csv(grid_summary, "Adjusted Emissions CO2.csv", row.names = FALSE)
+```
+
+## Load new data
+```{r}
+grid_summary <- read.csv("Adjusted Emissions CO2.csv")
+```
+
+# Plot Emissions Gridmap
+```{r}
+ggplot() +
+  borders("world", colour = "gray85", fill = "gray80") +
+  geom_tile(data = grid_summary, aes(x = lon, y = lat, fill = Adjusted_Emissions)) +
+  scale_fill_viridis_c(option = "plasma", name = "Projected 2030 CO2 Emissions (tonnes per 0.1x0.1 degree)", trans = "log10") +
+  scale_x_continuous(breaks = seq(floor(min(grid_summary$lon)), ceiling(max(grid_summary$lon)), by = 30)) +
+  scale_y_continuous(breaks = seq(floor(min(grid_summary$lat)), ceiling(max(grid_summary$lat)), by = 30)) +
+  coord_equal() +
+  theme_minimal() +
+  theme(
+    legend.title = element_text(size = 7), # Customize legend title
+  ) +
+  labs(title = "Adjusted Global Emissions Map (Logarithmic Scale)", x = "Longitude", y = "Latitude")
+```
+
+
+
